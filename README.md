@@ -113,5 +113,5 @@ GOOS=windows ./go.sh build ./...
 
 ## 文档
 
-- [中文使用文档](docs/usage.zh-CN.md) — 快速开始、事件处理、布局、15 个控件、主题、中英混排
-- [English usage guide](docs/usage.en.md) — same content in English
+- [中文使用文档](usage.zh-CN.md) — 快速开始、事件处理、布局、15 个控件、主题、中英混排
+- [English usage guide](usage.en.md) — same content in English

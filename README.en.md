@@ -113,5 +113,5 @@ GOOS=windows ./go.sh build ./...
 
 ## Documentation
 
-- [English usage guide](docs/usage.en.md) — getting started, event handling, layout, 15 widgets, theming, CJK/ASCII
-- [中文使用文档](docs/usage.zh-CN.md) — 快速开始、事件处理、布局、15 个控件、主题、中英混排
+- [English usage guide](usage.en.md) — getting started, event handling, layout, 15 widgets, theming, CJK/ASCII
+- [中文使用文档](usage.zh-CN.md) — 快速开始、事件处理、布局、15 个控件、主题、中英混排
