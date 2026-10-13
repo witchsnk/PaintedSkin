@@ -32,6 +32,7 @@ type windowsTerminal struct {
 	events   chan event.Event
 	stop     chan struct{}
 	stopOnce sync.Once
+	closer   func()
 }
 
 // New 打开控制台并开启 VT 模式。
@@ -39,15 +40,36 @@ func New(opts Options) (Terminal, error) {
 	in := os.Stdin
 	out := os.Stdout
 
+	var closer func()
 	origIn, origOut, err := consoleModes(windows.Handle(in.Fd()), windows.Handle(out.Fd()))
 	if err != nil {
-		return nil, fmt.Errorf("term: get console mode: %w", err)
+		// 管道重定向时尝试显式打开 CONIN$ / CONOUT$
+		conin, errIn := os.OpenFile("CONIN$", os.O_RDWR, 0)
+		conout, errOut := os.OpenFile("CONOUT$", os.O_RDWR, 0)
+		if errIn == nil && errOut == nil {
+			origIn, origOut, err = consoleModes(windows.Handle(conin.Fd()), windows.Handle(conout.Fd()))
+			if err == nil {
+				in = conin
+				out = conout
+				closer = func() {
+					_ = conin.Close()
+					_ = conout.Close()
+				}
+			} else {
+				_ = conin.Close()
+				_ = conout.Close()
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("term: get console mode: %w", err)
+		}
 	}
 
 	t := &windowsTerminal{
 		in:     in,
 		events: make(chan event.Event, 256),
 		stop:   make(chan struct{}),
+		closer: closer,
 	}
 	t.base = newBase(out, opts, querySize(windows.Handle(out.Fd())), capsFromEnv(envSnapshot(), opts))
 	t.base.restore = func() error {
@@ -60,9 +82,15 @@ func New(opts Options) (Terminal, error) {
 	rawIn := (origIn &^ (enableLineInput | enableEchoInput | enableProcessedInput | enableWindowInput)) | enableVirtualTerminalInput
 	rawOut := origOut | enableVirtualTerminalOutput
 	if err := windows.SetConsoleMode(windows.Handle(in.Fd()), rawIn); err != nil {
+		if closer != nil {
+			closer()
+		}
 		return nil, fmt.Errorf("term: enable VT input: %w", err)
 	}
 	if err := windows.SetConsoleMode(windows.Handle(out.Fd()), rawOut); err != nil {
+		if closer != nil {
+			closer()
+		}
 		return nil, fmt.Errorf("term: enable VT output: %w", err)
 	}
 	Enter(out, opts)
@@ -111,7 +139,11 @@ func (t *windowsTerminal) Close() error {
 	t.stopOnce.Do(func() {
 		close(t.stop)
 	})
-	return t.base.Close()
+	err := t.base.Close()
+	if t.closer != nil {
+		t.closer()
+	}
+	return err
 }
 
 // consoleModes 读取 stdin/stdout 当前 console mode。

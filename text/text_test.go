@@ -119,3 +119,26 @@ func TestPad(t *testing.T) {
 		t.Errorf("PadEnd must not truncate, got %q", got)
 	}
 }
+
+func TestStripEscapes(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"\x1b[31;44mhello\x1b[0m", "hello"},
+		{"\x1b[2J\x1b[Hclear", "clear"},
+		{"\x1b]52;c;evil\ahello", "hello"},
+		{"\x1b]0;Title\x1b\\content", "content"},
+		{"a\x07b\x00c\r\n", "abc\n"},
+		{"line1\nline2\ttab", "line1\nline2\ttab"},
+	}
+	for _, c := range cases {
+		if got := StripEscapes(c.in); got != c.want {
+			t.Errorf("StripEscapes(%q) = %q want %q", c.in, got, c.want)
+		}
+	}
+	// 验证带 ANSI 序列时的宽度计算
+	if w := Width("\x1b[31mhello\x1b[0m"); w != 5 {
+		t.Errorf("Width with ANSI = %d want 5", w)
+	}
+}

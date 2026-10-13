@@ -9,6 +9,18 @@ import (
 	"PaintedSkin/event"
 )
 
+// 缓冲区与序列最大长度限制（防 DoS / OOM）。
+const (
+	// MaxBufSize 是解码器缓冲区的最大字节数上限。
+	MaxBufSize = 64 * 1024
+	// MaxCsiParamsLen 是 CSI 参数的最大容忍长度。
+	MaxCsiParamsLen = 64
+	// MaxOscLen 是 OSC / DCS 序列的最大容忍长度。
+	MaxOscLen = 4096
+	// MaxPasteLen 是括号粘贴单次最大容忍长度。
+	MaxPasteLen = 64 * 1024
+)
+
 // Decoder 将终端字节流增量解码为结构化的 event.Event。
 type Decoder struct {
 	mu       sync.Mutex
@@ -16,6 +28,9 @@ type Decoder struct {
 
 	// buf 缓冲区：保存尚未处理的字节（跨 Feed 分片）
 	buf []byte
+
+	// flushCount 记录连续 Flush 次数，用于超时丢弃不完整或损坏序列
+	flushCount int
 }
 
 // New 创建一个新的 Decoder，cb 接收解码出的事件。
@@ -30,14 +45,39 @@ func (d *Decoder) Pending() bool {
 	return len(d.buf) > 0
 }
 
-// Flush 如果悬挂的是裸 ESC（ESC 歧义超时），强制结束并视为 KeyEsc。
-// 半截 CSI/鼠标/粘贴/OSC 序列不受影响，继续等待后续 Feed。
+// BufferLen 返回当前缓冲区未消费的字节长度（供测试与诊断使用）。
+func (d *Decoder) BufferLen() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.buf)
+}
+
+// Flush 处理输入超时。
+// 裸 ESC（ESC 歧义超时）结束并视为 KeyEsc。
+// 若连续多次 Flush（超时且无新字节到达）仍存在无法解析的不完整序列（如半截 CSI/OSC/DCS/未闭合粘贴），
+// 强制丢弃损坏序列头部以恢复输入状态机，防止状态机永久挂死。
 func (d *Decoder) Flush() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	if len(d.buf) == 0 {
+		d.flushCount = 0
+		return
+	}
+
 	if len(d.buf) == 1 && d.buf[0] == 0x1B {
 		d.buf = d.buf[:0]
+		d.flushCount = 0
 		d.emit(event.Key{Code: event.KeyEsc, Mod: event.ModNone, Press: true})
+		return
+	}
+
+	d.flushCount++
+	// 连续第二次 Flush（无新数据进入且仍处于 pending）说明序列被截断或损坏
+	if d.flushCount >= 2 {
+		d.flushCount = 0
+		// 丢弃损坏且超时的未完成序列，恢复输入状态机
+		d.buf = d.buf[:0]
 	}
 }
 
@@ -53,6 +93,18 @@ func (d *Decoder) emit(ev event.Event) {
 func (d *Decoder) Feed(b []byte) int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	d.flushCount = 0
+
+	// 缓冲区上限防护（防 DoS / OOM）：若超过容量上限，强制丢弃最早的无法解析的数据
+	if len(d.buf)+len(b) > MaxBufSize {
+		overflow := (len(d.buf) + len(b)) - MaxBufSize
+		if overflow >= len(d.buf) {
+			d.buf = d.buf[:0]
+		} else {
+			d.buf = d.buf[overflow:]
+		}
+	}
 
 	// 将新字节追加到缓冲区
 	d.buf = append(d.buf, b...)
@@ -381,6 +433,9 @@ func (d *Decoder) tryDecodeCsi() int {
 	}
 
 	if paramEnd >= len(rest) {
+		if len(rest) > MaxCsiParamsLen {
+			return 1 // 参数超长异常，消耗 ESC 避免无限堆积挂起
+		}
 		return 0 // pending，需要更多字节（最终字节）
 	}
 
@@ -587,6 +642,12 @@ func (d *Decoder) tryDecodePaste() int {
 	}
 	idx := bytes.Index(d.buf[startLen:], pasteTerminator)
 	if idx < 0 {
+		if len(d.buf) >= MaxPasteLen {
+			// 超长粘贴且未收到结束符，强制截断并分发当前已接收内容，退出粘贴状态
+			text := string(d.buf[startLen:])
+			d.emit(event.Paste{Text: text})
+			return len(d.buf)
+		}
 		return 0 // 结束符还没收齐，pending
 	}
 	text := string(d.buf[startLen : startLen+idx])
@@ -596,6 +657,9 @@ func (d *Decoder) tryDecodePaste() int {
 
 // tryDecodeOsc 处理 OSC 序列 ESC ] ... (BEL | ST)，内容忽略。
 func (d *Decoder) tryDecodeOsc() int {
+	if len(d.buf) > MaxOscLen {
+		return 1 // 超长 OSC 序列，丢弃 ESC 避免状态机挂死
+	}
 	for i := 2; i < len(d.buf); i++ {
 		if d.buf[i] == 0x07 { // BEL
 			return i + 1
@@ -614,6 +678,9 @@ func (d *Decoder) tryDecodeOsc() int {
 
 // tryDecodeDcs 处理 DCS 序列 ESC P ... ST，内容忽略。
 func (d *Decoder) tryDecodeDcs() int {
+	if len(d.buf) > MaxOscLen {
+		return 1 // 超长 DCS 序列，丢弃 ESC 避免状态机挂死
+	}
 	for i := 2; i < len(d.buf); i++ {
 		if d.buf[i] == 0x1B {
 			if i+1 >= len(d.buf) {

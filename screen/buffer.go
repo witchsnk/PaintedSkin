@@ -1,6 +1,8 @@
 package screen
 
 import (
+	"unicode"
+
 	"PaintedSkin/style"
 	"PaintedSkin/text"
 )
@@ -38,7 +40,12 @@ func EmptyCell() Cell { return Cell{} }
 func (c Cell) IsContinuation() bool { return c.Width == -1 }
 
 // Normalize 返回归一后的字符与宽度（供写入使用）。
+// 控制字符（C0/C1，如 ESC、BEL 等）非合法显示字符或组合附标，
+// 统一返回宽度 -1 进行过滤，杜绝终端转义序列注入风险。
 func Normalize(r rune) (rune, int) {
+	if unicode.IsControl(r) {
+		return 0, -1
+	}
 	w := text.RuneWidth(r)
 	if w < 0 {
 		return r, 1
@@ -267,39 +274,50 @@ func ansiPos(row, col int) []byte {
 	return append(buf, 'H')
 }
 
-// ansiStyle 生成 SGR 序列（末位 ';' 收尾为 'm'）。
+// ansiStyle 生成 SGR 序列，多个参数之间使用 ';' 分隔，以 'm' 结尾。
 func ansiStyle(s style.Style) []byte {
-	var seq []byte
+	seq := make([]byte, 0, 32)
 	seq = append(seq, "\x1b["...)
-	seq = appendColor(seq, s.FG, true)
-	seq = append(seq, appendColor(nil, s.BG, false)...)
+
+	appendParam := func(p []byte) {
+		if len(p) == 0 {
+			return
+		}
+		if len(seq) > 2 {
+			seq = append(seq, ';')
+		}
+		seq = append(seq, p...)
+	}
+
+	if s.FG.Kind != style.ColorDefault {
+		appendParam(appendColor(nil, s.FG, true))
+	}
+	if s.BG.Kind != style.ColorDefault {
+		appendParam(appendColor(nil, s.BG, false))
+	}
 	attrs := s.AttrMask()
 	if attrs&style.AttrBold != 0 {
-		seq = append(seq, '1', ';')
+		appendParam([]byte{'1'})
 	}
 	if attrs&style.AttrDim != 0 {
-		seq = append(seq, '2', ';')
+		appendParam([]byte{'2'})
 	}
 	if attrs&style.AttrItalic != 0 {
-		seq = append(seq, '3', ';')
+		appendParam([]byte{'3'})
 	}
 	if attrs&style.AttrUnderline != 0 {
-		seq = append(seq, '4', ';')
+		appendParam([]byte{'4'})
 	}
 	if attrs&style.AttrBlink != 0 {
-		seq = append(seq, '5', ';')
+		appendParam([]byte{'5'})
 	}
 	if attrs&style.AttrReverse != 0 {
-		seq = append(seq, '7', ';')
+		appendParam([]byte{'7'})
 	}
 	if attrs&style.AttrStrike != 0 {
-		seq = append(seq, '9', ';')
+		appendParam([]byte{'9'})
 	}
-	if len(seq) > 0 && seq[len(seq)-1] == ';' {
-		seq[len(seq)-1] = 'm'
-	} else {
-		seq = append(seq, 'm')
-	}
+	seq = append(seq, 'm')
 	return seq
 }
 

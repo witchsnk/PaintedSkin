@@ -13,12 +13,92 @@ package text
 
 import (
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/mattn/go-runewidth"
 )
 
+// IsControl 报告 r 是否为控制字符（C0、C1 控制符，如 ESC、BEL、CR 等）。
+func IsControl(r rune) bool {
+	return unicode.IsControl(r)
+}
+
+// StripEscapes 过滤字符串中的 ANSI 转义序列（CSI、OSC、DCS 等）以及危险控制字符，
+// 避免外部不可信数据向终端注入未授权控制序列。保留普通字符、换行符、制表符及合法的 Unicode 组合字素 / ZWJ。
+func StripEscapes(s string) string {
+	if s == "" {
+		return ""
+	}
+	var sb strings.Builder
+	sb.Grow(len(s))
+	i := 0
+	n := len(s)
+	for i < n {
+		b := s[i]
+		if b == 0x1B { // ESC
+			i++
+			if i >= n {
+				break
+			}
+			switch s[i] {
+			case '[': // CSI: ESC [ ... [0x40-0x7E]
+				i++
+				for i < n && (s[i] < 0x40 || s[i] > 0x7E) {
+					i++
+				}
+				if i < n {
+					i++ // 消费最终字节
+				}
+			case ']': // OSC: ESC ] ... (BEL 或 ESC \)
+				i++
+				for i < n {
+					if s[i] == 0x07 { // BEL
+						i++
+						break
+					}
+					if s[i] == 0x1B && i+1 < n && s[i+1] == '\\' { // ST
+						i += 2
+						break
+					}
+					i++
+				}
+			case 'P', '_', '^': // DCS, APC, PM: ESC P ... ST/BEL
+				i++
+				for i < n {
+					if s[i] == 0x07 {
+						i++
+						break
+					}
+					if s[i] == 0x1B && i+1 < n && s[i+1] == '\\' {
+						i += 2
+						break
+					}
+					i++
+				}
+			default:
+				// 2 字节转义序列（如 ESC N, ESC O）
+				i++
+			}
+			continue
+		}
+
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			i += size
+			continue
+		}
+		sb.WriteString(s[i : i+size])
+		i += size
+	}
+	return sb.String()
+}
+
 // RuneWidth 返回单字符占用的列数（0/1/2）。
 func RuneWidth(r rune) int {
+	if unicode.IsControl(r) {
+		return 0
+	}
 	w := runewidth.RuneWidth(r)
 	if w < 0 {
 		return 0
@@ -27,7 +107,12 @@ func RuneWidth(r rune) int {
 }
 
 // Width 返回字符串占用的终端列数。这是全框架唯一的宽度来源。
-func Width(s string) int { return runewidth.StringWidth(s) }
+func Width(s string) int {
+	if strings.ContainsRune(s, 0x1B) {
+		s = StripEscapes(s)
+	}
+	return runewidth.StringWidth(s)
+}
 
 // Truncate 按列宽裁剪字符串；不会劈开宽字符。
 // budget <= 0 时返回空串。
@@ -35,12 +120,18 @@ func Truncate(s string, budget int) string {
 	if budget <= 0 {
 		return ""
 	}
+	if strings.ContainsRune(s, 0x1B) {
+		s = StripEscapes(s)
+	}
 	if Width(s) <= budget {
 		return s
 	}
 	var sb strings.Builder
 	acc := 0
 	for _, r := range s {
+		if unicode.IsControl(r) {
+			continue
+		}
 		rw := RuneWidth(r)
 		if rw == 0 {
 			// 零宽字符不占列；若前面已有内容则并入。

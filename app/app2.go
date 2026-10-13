@@ -69,6 +69,7 @@ type App struct {
 	front    *screen.Buffer
 	renderer *screen.Renderer
 	post     []func()
+	wake     chan struct{}
 	closed   bool
 	once     sync.Once
 }
@@ -81,6 +82,7 @@ func New(cfg Config) *App {
 		root:     widget.NewRoot(),
 		buf:      screen.NewBuffer(c.Width, c.Height),
 		renderer: screen.NewRenderer(c.Writer),
+		wake:     make(chan struct{}, 1),
 	}
 	a.root.Layout(geom.Rect{X: 0, Y: 0, W: c.Width, H: c.Height})
 	// 只挂主题、不重绘：构造阶段不得产生任何输出副作用
@@ -129,6 +131,10 @@ func (a *App) Post(fn func()) {
 	a.mu.Lock()
 	a.post = append(a.post, fn)
 	a.mu.Unlock()
+	select {
+	case a.wake <- struct{}{}:
+	default:
+	}
 }
 
 // Flush 执行已投递的闭包并按需重绘。
@@ -280,7 +286,8 @@ func Run(cfg Config) (err error) {
 	quit := make(chan struct{})
 	var closeOnce sync.Once
 	stop := func() { closeOnce.Do(func() { close(quit) }) }
-	signalStop(stop)
+	cleanSignal := signalStop(stop)
+	defer cleanSignal()
 
 	// 输入解码：键盘/鼠标字节流 → 事件（与后端事件合并到同一通道）。
 	decoded := make(chan event.Event, 256)
@@ -301,6 +308,8 @@ func Run(cfg Config) (err error) {
 		select {
 		case <-quit:
 			return nil
+		case <-a.wake:
+			a.Flush()
 		case ev := <-decoded:
 			if ev == nil {
 				continue

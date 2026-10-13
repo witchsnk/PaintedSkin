@@ -379,3 +379,36 @@ func TestTrailingGarbageAfterSequence(t *testing.T) {
 	d.Feed([]byte("\x1b[?2004h"))
 	want(t, "mode set swallowed", evs)
 }
+
+func TestFlushRecoversFromUnterminatedSequence(t *testing.T) {
+	d, evs := collect()
+	// 未闭合的 OSC 序列，第一轮 flush 允许等待分片
+	d.Feed([]byte("\x1b]0;unfinished_title"))
+	if !d.Pending() {
+		t.Fatal("must be pending")
+	}
+	d.Flush()
+	if !d.Pending() {
+		t.Fatal("first flush should allow pending")
+	}
+	// 第二次连续 Flush（超时），丢弃损坏的 ESC，恢复输入状态机
+	d.Flush()
+	// 随后输入有效字符能够正常解码，不再挂死
+	d.Feed([]byte("a"))
+	want(t, "recover normal input", evs, key(event.KeyRune, 'a', event.ModNone))
+}
+
+func TestUnboundedBufferCap(t *testing.T) {
+	d, _ := collect()
+	// 喂入超大垃圾数据，验证缓冲区不会无限制增长引发 OOM
+	largeGarbage := make([]byte, input.MaxBufSize*2)
+	for i := range largeGarbage {
+		largeGarbage[i] = '1'
+	}
+	d.Feed([]byte("\x1b[")) // 挂起 CSI
+	d.Feed(largeGarbage)
+	bufLen := d.BufferLen()
+	if bufLen > input.MaxBufSize {
+		t.Errorf("bufLen = %d exceeds MaxBufSize %d", bufLen, input.MaxBufSize)
+	}
+}

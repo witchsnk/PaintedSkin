@@ -23,6 +23,7 @@ type unixTerminal struct {
 	stop     chan struct{}
 	stopOnce sync.Once
 	sigs     chan os.Signal
+	closer   func()
 }
 
 // New 打开当前终端，进入 raw mode 并开启备用屏等模式。
@@ -31,20 +32,38 @@ func New(opts Options) (Terminal, error) {
 	out := os.Stdout
 	fd := int(in.Fd())
 
+	var closer func()
 	orig, err := unix.IoctlGetTermios(fd, ioctlRead)
 	if err != nil {
-		return nil, fmt.Errorf("term: get termios: %w", err)
+		// stdin 可能是管道或重定向，尝试显式打开控制终端 /dev/tty
+		tty, ttyErr := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+		if ttyErr != nil {
+			return nil, fmt.Errorf("term: get termios: %w (fallback /dev/tty: %v)", err, ttyErr)
+		}
+		in = tty
+		out = tty
+		fd = int(in.Fd())
+		orig, err = unix.IoctlGetTermios(fd, ioctlRead)
+		if err != nil {
+			_ = tty.Close()
+			return nil, fmt.Errorf("term: get termios on /dev/tty: %w", err)
+		}
+		closer = func() { _ = tty.Close() }
 	}
 
 	t := &unixTerminal{
 		in:     in,
 		events: make(chan event.Event, 256),
 		stop:   make(chan struct{}),
+		closer: closer,
 	}
 	t.base = newBase(out, opts, querySize(fd), capsFromEnv(envSnapshot(), opts))
 	t.base.restore = func() error { return unix.IoctlSetTermios(fd, ioctlWrite, orig) }
 
 	if err := setRaw(fd, orig); err != nil {
+		if closer != nil {
+			closer()
+		}
 		return nil, fmt.Errorf("term: set raw mode: %w", err)
 	}
 	Enter(out, opts)
@@ -94,7 +113,11 @@ func (t *unixTerminal) Close() error {
 	t.stopOnce.Do(func() {
 		close(t.stop)
 	})
-	return t.base.Close()
+	err := t.base.Close()
+	if t.closer != nil {
+		t.closer()
+	}
+	return err
 }
 
 // setRaw 清掉 ECHO|ICANON|ISIG|IEXTEN|IXON 等标志，置 VMIN=1 VTIME=0。

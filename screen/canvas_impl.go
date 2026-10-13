@@ -1,6 +1,8 @@
 package screen
 
 import (
+	"unicode"
+
 	"PaintedSkin/geom"
 	"PaintedSkin/style"
 	"PaintedSkin/text"
@@ -70,7 +72,11 @@ func (b *Buffer) SetCell(x, y int, r rune, s style.Style) {
 	if !b.inClip(x, y) {
 		return
 	}
-	_, w := Normalize(r)
+	nr, w := Normalize(r)
+	if w < 0 || unicode.IsControl(r) {
+		return
+	}
+	r = nr
 	row := y * b.w
 
 	// 零宽字符（组合附标 / ZWJ）并入**前一格**的 Tail：终端只有收到
@@ -111,6 +117,9 @@ func (b *Buffer) SetCell(x, y int, r rune, s style.Style) {
 // 右半），再往左退到那个宽字符的左格 —— 附标必须紧跟基字符，不能挂到宽字符
 // **前面**那一格去。没有可依附的非空格时丢弃。
 func (b *Buffer) appendTail(x, row int, r rune) {
+	if unicode.IsControl(r) {
+		return
+	}
 	i := x - 1
 	for i >= 0 && b.cells[row+i].IsContinuation() {
 		i--
@@ -188,12 +197,16 @@ func (b *Buffer) fillCells(rect geom.Rect, r rune, s style.Style) {
 }
 
 // Text 写入文本，按显示宽步进（宽字符占两格，右格写占位）。
-//
+// 自动过滤外部文本中的 ANSI 转义序列及危险控制字符，杜绝终端转义注入。
 // 零宽字符（组合附标 / ZWJ）**不推进列**，交给 SetCell 并入前一格的 Tail
 // —— 逐格丢弃会让终端收不到完整的字素序列（ADR-022/023 的遗留修复）。
 func (b *Buffer) Text(x, y int, s string, st style.Style) {
+	s = text.StripEscapes(s)
 	cx := x
 	for _, r := range s {
+		if unicode.IsControl(r) {
+			continue
+		}
 		rw := text.RuneWidth(r)
 		if rw == 0 {
 			if cx > b.w {

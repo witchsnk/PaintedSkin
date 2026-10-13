@@ -157,6 +157,48 @@ func TestAnsiDefaultNoColor(t *testing.T) {
 	}
 }
 
+func TestAnsiCompoundStyle(t *testing.T) {
+	st := style.Style{}.WithForeground(style.Red).WithBackground(style.Blue)
+	if got := ansiStyle(st); string(got) != "\x1b[31;44m" {
+		t.Errorf("fg+bg = %q want ESC[31;44m", got)
+	}
+
+	stBold := st.WithBold(true)
+	if got := ansiStyle(stBold); string(got) != "\x1b[31;44;1m" {
+		t.Errorf("fg+bg+bold = %q want ESC[31;44;1m", got)
+	}
+
+	c256fg := style.Color{Kind: style.Color256, N: 33}
+	c256bg := style.Color{Kind: style.Color256, N: 44}
+	st256 := style.Style{}.WithForeground(c256fg).WithBackground(c256bg)
+	if got := ansiStyle(st256); string(got) != "\x1b[38;5;33;48;5;44m" {
+		t.Errorf("256 fg+bg = %q", got)
+	}
+}
+
+func TestEscapeInjectionPrevention(t *testing.T) {
+	b := NewBuffer(10, 2)
+	// CSI 转义注入应被剥离，不进入缓冲区，不执行清屏
+	b.Text(0, 0, "\x1b[2Jhello", style.Default)
+	if b.At(0, 0).Rune != 'h' || b.At(4, 0).Rune != 'o' {
+		t.Errorf("text contaminated: cell0=%+v", b.At(0, 0))
+	}
+	// OSC 52 剪贴板注入应被彻底剥离
+	b.Text(0, 1, "\x1b]52;c;evil\aABC", style.Default)
+	if b.At(0, 1).Rune != 'A' || b.At(1, 1).Rune != 'B' || b.At(2, 1).Rune != 'C' {
+		t.Errorf("OSC not stripped: cell0=%+v", b.At(0, 1))
+	}
+
+	// 裸控制字符不得作为零宽字符并入 Tail
+	b.SetCell(0, 0, 'X', style.Default)
+	b.SetCell(1, 0, '\x1b', style.Default)
+	b.SetCell(1, 0, '\a', style.Default)
+	c := b.At(0, 0)
+	if c.Tail != "" {
+		t.Errorf("control char injected into Tail: %q", c.Tail)
+	}
+}
+
 // Box 在 H=1 时不得上下边框互相覆盖（应退化为单线）。
 func TestBoxSingleRow(t *testing.T) {
 	b := NewBuffer(6, 3)
